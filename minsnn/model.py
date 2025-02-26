@@ -1,7 +1,13 @@
 import torch.nn as nn 
 import torch
+import snntorch as snn 
 import numpy as np 
 from neurons import Leaky
+from tqdm import tqdm 
+from torch.optim import Adam 
+import torch.nn.functional as F 
+
+device = "cuda:0"
 # Leaky neuron model, overriding the backward pass with a custom function
 class LeakySurrogate(nn.Module):
     def __init__(self, beta, threshold=1.0):
@@ -50,6 +56,68 @@ num_outputs = 10
 num_steps = 25
 beta = 0.95
 
+class LeakyLayer(nn.Linear): 
+    def __init__(self, in_features, out_features, activation, bias=False):
+        super().__init__(in_features, out_features, bias=bias) 
+
+        # choose spiking neuron or standard neuron 
+        if activation == "lif":
+            self.activation = snn.Leaky(beta=0.8) 
+            self.lif = True 
+        else:
+            self.activation = nn.ReLU() 
+            self.lif = False 
+        
+        self.opt = Adam(self.parameters(), lr=0.03)
+        self.threshold = 5.0 
+        self.num_epochs = 1000 
+
+    def forward(self, x): 
+        if self.lif == True: 
+            mem = self.activation.init_leaky() # init membrane potential 
+
+        x_direction = x / (torch.norm(x, p=2, dim=1, keepdim=True) + 1e-4) # normalize the input 
+
+        # Linear layer - not using nn.Linear(...) so we can define the update rule
+        weighted_input = torch.mm(x_direction, self.weight.T.to(device)) 
+        # Matmul between normalized input and weight matrix
+
+        if self.lif == True: 
+            spk, potential = self.activation(weighted_input, mem) # note: only 1 step in time. Wrap in a for-loop to iterate for longer 
+        else: 
+            potential = self.activation(weighted_input) 
+        
+        return potential # to be used in subsequent layers or as the final output of the last layer 
+
+    def train(self, x_pos, x_neg): 
+        tot_loss = [] # store the loss values for each layer in each epoch 
+        for _ in tqdm(range(self.num_epochs), desc="Training LeakyLayer"):
+            # Compute goodness 
+            g_pos = self.forward(x_pos).pow(2).mean(1) # positive data 
+            g_neg = self.forward(x_neg).pow(2).mean(1) # negative data 
+
+            # take the mean of differences between goodness and threshold across pos and neg 
+            loss = F.softplus(torch.cat([-g_pos + self.threshold, g_neg - self.threshold])).mean() 
+
+            self.opt.zero_grad() 
+            loss.backward() # local backward-pass 
+            self.opt.step() # update weights 
+            tot_loss.append(loss) 
+        
+        # returns the final membran potentials (activations) for positive and negaive examples after training. 
+        # detach() ensures no further backward pass is possible 
+        output = self.forward(x_pos).detach(), self.forward(x_neg).detach()
+        return (output, tot_loss)
+
+class FF_Net(nn.Module):
+    def __init__(self, dims, activation): 
+        super().__init__()
+
+        self.layers = nn.ModuleList([
+            LeakyLayer(dims[d], dims[d+1], activation) for d in range(len(dims) - 1) # define a multi-layer network 
+        ]) 
+
+            
 # Define Network
 class Net(nn.Module):
     def __init__(self):
