@@ -6,9 +6,23 @@ from neurons import Leaky
 from tqdm import tqdm 
 from torch.optim import Adam 
 import torch.nn.functional as F 
+import matplotlib.pyplot as plt 
 
 device = "cuda:0"
 # Leaky neuron model, overriding the backward pass with a custom function
+def overlay_y_on_x(x, y):
+    """Replace the first 10 pixels of data [x] with one-hot-encoded label [y]"""
+    x_ = x.clone() 
+    x_[:, :10] *= 0.0 # zero out the first 10 pixels of input data 
+    x_[range(x.shape[0]), y] = x.max() # the y-label 'activates' the corresponding pixel 
+    return x_ 
+
+def visualize_sample(data, name='', idx=0):
+    reshaped = data[idx].cpu().reshape(28, 28) 
+    plt.figure(figsize = (4, 4)) 
+    plt.title(name) 
+    plt.imshow(reshaped, cmap="gray") 
+    plt.show()
 class LeakySurrogate(nn.Module):
     def __init__(self, beta, threshold=1.0):
         super(LeakySurrogate, self).__init__()
@@ -55,6 +69,7 @@ num_outputs = 10
 # Temporal Dynamics
 num_steps = 25
 beta = 0.95
+
 
 class LeakyLayer(nn.Linear): 
     def __init__(self, in_features, out_features, activation, bias=False):
@@ -117,6 +132,31 @@ class FF_Net(nn.Module):
             LeakyLayer(dims[d], dims[d+1], activation) for d in range(len(dims) - 1) # define a multi-layer network 
         ]) 
 
+    def predict(self, x): 
+        num_labels = 10
+        goodness_per_label = [] # used to store the goodness values for each label 
+
+        for label in range(num_labels):
+            h = overlay_y_on_x(x, label) # overlay label info on top of the input data
+            goodness = [] 
+
+            for layer in self.layers: # inner loop over the 10 possible labels 
+                h = layer(h) 
+                goodness.append(h.pow(2).mean(1)) # compute and store goodness for every layer 
+            goodness_per_label.append(sum(goodness).unsqueeze(1)) # sum goodness values between all layers for one sample of data 
+        goodness_per_label = torch.cat(goodness_per_label, 1) # convert list to tensor 
+        return goodness_per_label.argmax(1) # returns max value giving the predicted label for each input 
+
+    def train(self, x_pos, x_neg):
+        h_pos, h_neg = x_pos, x_neg 
+        layer_losses = [] 
+        for i, layer in enumerate(self.layers): 
+            print('Training layer', i, '...') 
+            outputs, loss = layer.train(h_pos, h_neg) 
+            # update the weight matrix for each layer based on the local loss (defined by 'goodness') 
+            h_pos, h_neg = outputs 
+            layer_losses.append(loss) 
+        return torch.Tensor(layer_losses)
             
 # Define Network
 class Net(nn.Module):
